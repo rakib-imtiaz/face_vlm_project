@@ -32,6 +32,18 @@ GENERATED_DIR = os.path.join(OUTPUTS_DIR, 'generated_images')
 EVAL_DIR = os.path.join(OUTPUTS_DIR, 'evaluation')
 os.makedirs(EVAL_DIR, exist_ok=True)
 
+def get_dataset_path(dataset_name):
+    """Get the path to the dataset"""
+    if dataset_name == 'celebN':
+        dataset_path = os.path.join(PROJECT_DIR, 'celebN')
+    else:
+        dataset_path = os.path.join(DATA_DIR, dataset_name)
+    
+    if not os.path.exists(dataset_path):
+        print(f"Warning: Dataset path {dataset_path} does not exist!")
+    
+    return dataset_path
+
 # Define transforms
 preprocess = Compose([
     Resize(299),  # Inception V3 input size
@@ -104,9 +116,14 @@ def calculate_fid(real_path, generated_path, model_name=None, generator_name=Non
     generated_files = []
     
     # Get generation info if available
-    info_path = os.path.join(generated_path, 'generation_info.csv')
+    info_path = os.path.join(GENERATED_DIR, 'generation_info.csv')
     if os.path.exists(info_path):
         info_df = pd.read_csv(info_path)
+        
+        # Filter for the specific model and generator if provided
+        if model_name and generator_name:
+            info_df = info_df[(info_df['vlm_model'] == model_name) & 
+                              (info_df['generator'] == generator_name)]
         
         # Match original images with their generated counterparts
         for _, row in info_df.iterrows():
@@ -168,7 +185,8 @@ def calculate_fid(real_path, generated_path, model_name=None, generator_name=Non
 
 def main():
     parser = argparse.ArgumentParser(description="Calculate FID scores between original and generated images")
-    parser.add_argument('--dataset', type=str, default='lfw', help='Dataset directory name in data/')
+    parser.add_argument('--dataset', type=str, default='celebN', choices=['lfw', 'celeba', 'celebN'],
+                        help='Dataset directory name (lfw, celeba, or celebN)')
     parser.add_argument('--vlm_models', type=str, nargs='+', 
                         choices=['paligemma', 'florence', 'cogvlm', 'llama', 'llava', 'all'],
                         default=['all'],
@@ -196,61 +214,80 @@ def main():
         generators = args.generators
     
     # Get dataset directory
-    dataset_dir = os.path.join(DATA_DIR, args.dataset)
+    dataset_dir = get_dataset_path(args.dataset)
     if not os.path.exists(dataset_dir):
-        print(f"Dataset directory {dataset_dir} does not exist. Please run 1_download_dataset.py first.")
+        print(f"Dataset directory {dataset_dir} does not exist. Please check dataset path.")
         return
     
-    # Calculate FID for each VLM and generator combination
+    # Calculate FID scores for all model combinations
     results = []
     
-    for vlm_model in vlm_models:
-        for generator in generators:
-            generation_dir = os.path.join(GENERATED_DIR, f"{vlm_model}_to_{generator}")
+    for model_name in vlm_models:
+        for generator_name in generators:
+            generation_dir = os.path.join(GENERATED_DIR, f"{model_name}_to_{generator_name}")
             
             if not os.path.exists(generation_dir):
-                print(f"Generated images directory {generation_dir} does not exist.")
+                print(f"Directory {generation_dir} does not exist. Skipping.")
                 continue
                 
-            print(f"\nEvaluating {vlm_model} with {generator}...")
-            result = calculate_fid(dataset_dir, generation_dir, vlm_model, generator)
+            print(f"\nCalculating FID for {model_name} + {generator_name}...")
+            result = calculate_fid(dataset_dir, generation_dir, model_name, generator_name)
             
             if result:
                 results.append(result)
     
-    # Save results
-    if results:
-        results_df = pd.DataFrame(results)
-        results_file = os.path.join(EVAL_DIR, 'fid_scores.csv')
-        results_df.to_csv(results_file, index=False)
-        
-        # Plot results
-        plt.figure(figsize=(12, 8))
-        
-        # Group by VLM model and plot
-        for vlm_model in vlm_models:
-            model_results = results_df[results_df['vlm_model'] == vlm_model]
-            if not model_results.empty:
-                plt.bar(
-                    [f"{vlm_model}_{gen}" for gen in model_results['generator_model']], 
-                    model_results['fid_score'], 
-                    label=vlm_model
-                )
-        
-        plt.xlabel('Model Combination')
-        plt.ylabel('FID Score (lower is better)')
-        plt.title('FID Scores by Model Combination')
-        plt.xticks(rotation=45, ha='right')
-        plt.legend()
-        plt.tight_layout()
-        
-        # Save plot
-        plt.savefig(os.path.join(EVAL_DIR, 'fid_scores.png'))
-        
-        print(f"\nResults saved to {results_file}")
-        print(f"Plot saved to {os.path.join(EVAL_DIR, 'fid_scores.png')}")
-    else:
-        print("No results to save.")
+    if not results:
+        print("No FID scores calculated. Please check that generated images exist.")
+        return
+    
+    # Save results to CSV
+    results_df = pd.DataFrame(results)
+    csv_path = os.path.join(EVAL_DIR, 'fid_scores.csv')
+    results_df.to_csv(csv_path, index=False)
+    print(f"Saved FID scores to {csv_path}")
+    
+    # Create a bar chart of FID scores
+    plt.figure(figsize=(12, 8))
+    
+    # Pivot the data for plotting
+    pivot_df = results_df.pivot(index='vlm_model', columns='generator_model', values='fid_score')
+    
+    # Plot
+    pivot_df.plot(kind='bar', ax=plt.gca())
+    plt.title('FID Scores by Model Combination')
+    plt.xlabel('VLM Model')
+    plt.ylabel('FID Score (lower is better)')
+    plt.grid(axis='y', linestyle='--', alpha=0.7)
+    plt.legend(title='Generator Model')
+    plt.tight_layout()
+    
+    # Save the figure
+    plot_path = os.path.join(EVAL_DIR, 'fid_scores.png')
+    plt.savefig(plot_path)
+    print(f"Saved FID score plot to {plot_path}")
+    
+    # Display performance summary
+    print("\nPerformance Summary:")
+    print("Best overall combination:")
+    best_idx = results_df['fid_score'].idxmin()
+    best_result = results_df.iloc[best_idx]
+    print(f"  {best_result['vlm_model']} + {best_result['generator_model']}: FID = {best_result['fid_score']:.4f}")
+    
+    # Best by VLM model
+    print("\nBest generator for each VLM model:")
+    for model in results_df['vlm_model'].unique():
+        model_results = results_df[results_df['vlm_model'] == model]
+        best_idx = model_results['fid_score'].idxmin()
+        best_result = model_results.iloc[best_idx % len(model_results)]
+        print(f"  {model}: {best_result['generator_model']} (FID = {best_result['fid_score']:.4f})")
+    
+    # Best by generator
+    print("\nBest VLM model for each generator:")
+    for generator in results_df['generator_model'].unique():
+        gen_results = results_df[results_df['generator_model'] == generator]
+        best_idx = gen_results['fid_score'].idxmin()
+        best_result = gen_results.iloc[best_idx % len(gen_results)]
+        print(f"  {generator}: {best_result['vlm_model']} (FID = {best_result['fid_score']:.4f})")
 
 if __name__ == "__main__":
     main() 

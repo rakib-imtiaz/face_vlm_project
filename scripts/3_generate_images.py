@@ -18,6 +18,18 @@ OUTPUTS_DIR = os.path.join(PROJECT_DIR, 'outputs')
 GENERATED_DIR = os.path.join(OUTPUTS_DIR, 'generated_images')
 os.makedirs(GENERATED_DIR, exist_ok=True)
 
+def get_dataset_path(dataset_name):
+    """Get the path to the dataset"""
+    if dataset_name == 'celebN':
+        dataset_path = os.path.join(PROJECT_DIR, 'celebN')
+    else:
+        dataset_path = os.path.join(DATA_DIR, dataset_name)
+    
+    if not os.path.exists(dataset_path):
+        print(f"Warning: Dataset path {dataset_path} does not exist!")
+    
+    return dataset_path
+
 def load_descriptions(model_name):
     """Load facial descriptions extracted by a VLM model"""
     description_path = os.path.join(OUTPUTS_DIR, model_name, 'facial_descriptions.json')
@@ -200,104 +212,99 @@ class PixArtAlphaGenerator(ImageGenerator):
 
 def main():
     parser = argparse.ArgumentParser(description="Generate images from facial descriptions")
-    parser.add_argument('--vlm_model', type=str, choices=['paligemma', 'florence', 'cogvlm', 'llama', 'llava', 'all'],
-                        default='paligemma',
-                        help='VLM model whose descriptions to use for generation')
+    parser.add_argument('--dataset', type=str, default='celebN', choices=['lfw', 'celeba', 'celebN'],
+                        help='Dataset directory name (lfw, celeba, or celebN)')
+    parser.add_argument('--vlm_model', type=str, nargs='+', 
+                        choices=['paligemma', 'florence', 'cogvlm', 'llama', 'llava', 'all'],
+                        default=['all'],
+                        help='VLM model to use for descriptions')
     parser.add_argument('--generators', type=str, nargs='+', 
                         choices=['stable-diffusion', 'sdxl-turbo', 'realistic-vision', 'portrait-plus', 'pixart-alpha', 'all'],
-                        default=['stable-diffusion'],
-                        help='Image generation models to use')
-    parser.add_argument('--limit', type=int, default=10, help='Limit number of descriptions to process')
-    parser.add_argument('--min_desc_length', type=int, default=20, 
-                        help='Minimum description length to consider for generation')
+                        default=['all'],
+                        help='Image generators to use')
+    parser.add_argument('--limit', type=int, default=5,
+                        help='Limit number of descriptions to process')
     args = parser.parse_args()
     
+    # Get dataset path
+    dataset_path = get_dataset_path(args.dataset)
+    
     # Check if 'all' is selected for VLM models
-    if args.vlm_model == 'all':
+    if 'all' in args.vlm_model:
         vlm_models = ['paligemma', 'florence', 'cogvlm', 'llama', 'llava']
     else:
-        vlm_models = [args.vlm_model]
+        vlm_models = args.vlm_model
     
     # Check if 'all' is selected for generators
     if 'all' in args.generators:
         generators = ['stable-diffusion', 'sdxl-turbo', 'realistic-vision', 'portrait-plus', 'pixart-alpha']
     else:
         generators = args.generators
+        
+    # Initialize generators
+    generator_instances = {}
+    for generator_name in generators:
+        if generator_name == 'stable-diffusion':
+            generator_instances[generator_name] = StableDiffusionGenerator(generator_name)
+        elif generator_name == 'sdxl-turbo':
+            generator_instances[generator_name] = SDXLTurboGenerator(generator_name)
+        elif generator_name == 'realistic-vision':
+            generator_instances[generator_name] = RealisticVisionGenerator(generator_name)
+        elif generator_name == 'portrait-plus':
+            generator_instances[generator_name] = PortraitPlusGenerator(generator_name)
+        elif generator_name == 'pixart-alpha':
+            generator_instances[generator_name] = PixArtAlphaGenerator(generator_name)
     
-    # Generate images for each VLM model and generator combination
+    # For each VLM model and generator combination
+    generation_info = []
+    
     for vlm_model in vlm_models:
+        print(f"\nProcessing descriptions from {vlm_model}...")
+        
         # Load descriptions
         descriptions = load_descriptions(vlm_model)
         if descriptions is None:
             continue
         
-        # Filter descriptions
-        filtered_descriptions = {}
-        for image_name, desc in descriptions.items():
-            if len(desc) >= args.min_desc_length and "Error" not in desc:
-                filtered_descriptions[image_name] = desc
+        # Limit the number of descriptions to process
+        description_items = list(descriptions.items())[:args.limit]
         
-        if len(filtered_descriptions) == 0:
-            print(f"No valid descriptions found for {vlm_model}")
-            continue
-        
-        # Limit the number of descriptions
-        if args.limit > 0 and args.limit < len(filtered_descriptions):
-            image_names = list(filtered_descriptions.keys())[:args.limit]
-            limited_descriptions = {name: filtered_descriptions[name] for name in image_names}
-        else:
-            limited_descriptions = filtered_descriptions
-        
-        print(f"Using {len(limited_descriptions)} descriptions from {vlm_model}")
-        
-        # Create generators
-        image_generators = {}
-        for generator_name in generators:
-            if generator_name == 'stable-diffusion':
-                image_generators[generator_name] = StableDiffusionGenerator(generator_name)
-            elif generator_name == 'sdxl-turbo':
-                image_generators[generator_name] = SDXLTurboGenerator(generator_name)
-            elif generator_name == 'realistic-vision':
-                image_generators[generator_name] = RealisticVisionGenerator(generator_name)
-            elif generator_name == 'portrait-plus':
-                image_generators[generator_name] = PortraitPlusGenerator(generator_name)
-            elif generator_name == 'pixart-alpha':
-                image_generators[generator_name] = PixArtAlphaGenerator(generator_name)
-        
-        # Load generators
-        for generator_name, generator in image_generators.items():
-            generator.load_model()
-            
-            # Create output directory
+        # Create output directory for this model
+        for generator_name, generator in generator_instances.items():
+            # Create directory for this VLM-generator combination
             output_dir = os.path.join(GENERATED_DIR, f"{vlm_model}_to_{generator_name}")
             os.makedirs(output_dir, exist_ok=True)
             
-            # Generate images
-            print(f"Generating images using {generator_name} with descriptions from {vlm_model}...")
+            print(f"Loading {generator_name} model...")
+            generator.load_model()
             
-            # Save generation info
-            generation_info = []
-            
-            for image_name, description in tqdm(limited_descriptions.items()):
+            print(f"Generating images using {generator_name}...")
+            for image_name, description in tqdm(description_items, desc=f"Generating with {generator_name}"):
+                # Create an output path for the generated image
                 output_path = os.path.join(output_dir, f"generated_{image_name}")
+                
+                # Generate the image
                 success = generator.generate_image(description, output_path)
                 
                 if success:
+                    # Add to generation info
                     generation_info.append({
+                        'vlm_model': vlm_model,
+                        'generator': generator_name,
                         'original_image': image_name,
                         'generated_image': f"generated_{image_name}",
-                        'description': description,
-                        'vlm_model': vlm_model,
-                        'generator_model': generator_name
+                        'description': description[:100] + "..." if len(description) > 100 else description
                     })
-            
-            # Save generation info
-            info_df = pd.DataFrame(generation_info)
-            info_df.to_csv(os.path.join(output_dir, 'generation_info.csv'), index=False)
-            
-            print(f"Generated {len(generation_info)} images using {generator_name} with descriptions from {vlm_model}")
+                else:
+                    print(f"Failed to generate image for {image_name}")
     
-    print("Image generation complete!")
+    # Save generation info as CSV
+    info_path = os.path.join(GENERATED_DIR, 'generation_info.csv')
+    pd.DataFrame(generation_info).to_csv(info_path, index=False)
+    
+    print("\nImage generation complete!")
+    print(f"Generated images are saved in {GENERATED_DIR}")
+    print(f"Generation info is saved in {info_path}")
 
 if __name__ == "__main__":
     main() 
